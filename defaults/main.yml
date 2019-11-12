@@ -1,0 +1,32 @@
+---
+# defaults file for ansible-archivematica-cont
+
+# Directory to install source code
+amcont_src_dir: "/opt/archivematica"
+# Directory to install compose file and config files
+amcont_compose_cfg_dir: "/etc/am-compose"
+
+# Repositories
+amcont_am_repo: "https://github.com/artefactual/archivematica.git"
+amcont_ss_repo: "https://github.com/artefactual/archivematica-storage-service.git"
+amcont_sampledata_repo: "https://github.com/artefactual/archivematica-sampledata.git"
+am_automation_tools_repo: "https://github.com/artefactual/automation-tools.git"
+
+# Branches
+amcont_am_version: "stable/1.10.x"
+amcont_ss_version: "stable/0.15.x"
+
+# docker external volumes
+amcont_ext_volumes:
+  - name: "ss-location-data"    # what is this? base directory for transfer sources?
+    path: "/home"
+  - name: "ss-staging-data"
+    path: "/var/am-compose/ss-staging-data"
+  - name: "ss-code"
+    path: "{{ amcont_src_dir }}/archivematica-storage-service"
+  - name: "mysql-data"
+    path: "/var/am-compose/mysql-data"
+  - name: "am-pipeline-data"
+    path: "/var/am-compose/am-pipeline-data"
+  - name: "archivematica-sampledata"
+    path: "{{ amcont_src_dir }}/archivematica-sampledata"

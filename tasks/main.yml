@@ -1,0 +1,143 @@
+---
+# tasks file for ansible-archivematica-cont
+
+# TODO: check if all the volumes' paths exist
+# exit with and error if not (use stat module)
+
+
+# TODO: add required system ssers to host
+# - archivematica uid:333 ?
+# - mysql uid:
+
+- name: "Create required  users in host"
+  user:
+    name: "{{ item.name }}"
+    uid: "{{ item.uid | default(omit) }}"
+    system: "{{ item.system | default(omit) }}"
+    home: "{{ item.home | default(omit) }}"
+    create_home: "{{ item.create_home | default(omit) }}"
+    shell: "{{ item.shell | default(omit) }}"
+  tags: am-cont-users
+  loop:
+    - { name: 'archivematica', 
+        system: 'yes', 
+        uid: '333', 
+        home: '/nonexistent', 
+        create_home: 'no', 
+        shell: '/bin/false'}
+    - { name: 'mysql', 
+        system: 'yes',
+        home: '/nonexistent', 
+        create_home: 'no', 
+        shell: '/bin/false'}
+
+- name: "Install dependencies required by this role"
+  package:
+    name: "{{ item }}"
+  loop:
+    - docker
+    - docker-compose
+
+- name: "Checkout archivematica-storage-service code"
+  git:
+    repo: "{{ amcont_ss_repo }}"
+    dest: "{{ amcont_src_dir }}/archivematica-storage-service"
+    version: "{{ amcont_ss_version }}"
+    accept_hostkey: "yes"
+  tags: "amcont-ss-clone"
+
+- name: "Checkout Archivematica code"
+  git:
+    repo: "{{ amcont_am_repo }}"
+    dest: "{{ amcont_src_dir }}/archivematica"
+    version: "{{ amcont_am_version }}"
+    accept_hostkey: "yes"
+  tags: "amcont-am-clone"
+
+- name: "Checkout out archivematica-sampledata repository"
+  git:
+    repo: "{{ amcont_sampledata_repo }}"
+    dest: "{{ amcont_src_dir }}/archivematica-sampledata"
+    depth: 1
+    accept_hostkey: "yes"
+  tags: "amcont-sampledata-clone"
+
+- name: "Create directory for compose files and config files"
+  file:
+    name: "{{ amcont_compose_cfg_dir }}/{{ item }}"
+    state: directory
+    recurse: yes
+  loop:
+    - "etc/nginx/conf.d"
+
+- name: "Create docker compose file from template"
+  template:
+    src: "docker-compose-am-src.yml.j2"
+    dest: "{{ amcont_compose_cfg_dir }}/docker-compose.yml"
+
+# Create docker volumes
+# For simplicity, all created volumes are bind mounts os existing mount points
+# (i.e., all directories should be created beforehand, 
+#  all  NFS/CIFS/etc volumes should be mounted beforehand )
+- name: "Create volumes"
+  docker_volume:
+    name: "{{ item.name }}"
+    driver_options:
+      type: "none"
+      o: "bind"
+      device: "{{ item.path }}"
+  loop: "{{ amcont_ext_volumes }}"
+
+- name: "Copy nginx configuration"
+  template:
+    src: "etc/nginx/{{ item }}"
+    dest: "{{ amcont_compose_cfg_dir }}/etc/nginx/{{ item }}" 
+  loop:
+    - "nginx.conf"
+    - "conf.d/default.conf"
+    - "conf.d/archivematica.conf"
+
+- name: "Start docker compose and build"
+  docker_compose:
+    project_src: "{{ amcont_compose_cfg_dir }}"
+    build: yes
+
+# https://stackoverflow.com/questions/40230184/how-to-do-multiline-shell-script-in-ansible
+- name: "Block to bootstrap Storage Service"
+  block:
+    - name: "Recreate SS database"
+      shell:
+        cmd: |
+          docker-compose exec mysql mysql -hlocalhost -uroot -p12345 -e "\
+            DROP DATABASE IF EXISTS SS; \
+            CREATE DATABASE SS; \
+            GRANT ALL ON SS.* TO 'archivematica'@'%' IDENTIFIED BY 'demo';"
+        chdir: "{{ amcont_compose_cfg_dir }}"
+    - name: "Migrate SS database"
+      shell:
+        cmd: |
+          docker-compose run \
+            --rm \
+            --entrypoint /src/storage_service/manage.py \
+            archivematica-storage-service \
+            migrate --noinput
+        chdir: "{{ amcont_compose_cfg_dir }}"
+    - name: "Create SS user"
+      shell:
+        cmd: |
+          docker-compose run \
+            --rm \
+            --entrypoint /src/storage_service/manage.py \
+            archivematica-storage-service \
+            create_user \
+            --username="test" \
+            --password="test" \
+            --email="test@test.com" \
+            --api-key="test" \
+            --superuser
+        chdir: "{{ amcont_compose_cfg_dir }}"
+    - name: "Restart storage service"
+      shell:
+        cmd: docker-compose restart archivematica-storage-service
+        chdir: "{{ amcont_compose_cfg_dir }}"
+  tags: amcont-ss-db-bootstrap
