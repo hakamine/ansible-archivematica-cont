@@ -5,11 +5,25 @@
 # exit with and error if not (use stat module)
 
 
-# TODO: add required system ssers to host
-# - archivematica uid:333 ?
-# - mysql uid:
+- name: "Set fact: users"
+  set_fact:
+    amcont_fact_users:
+      - { name: 'archivematica', 
+          system: 'yes', 
+          uid: '333', 
+          home: '/nonexistent', 
+          create_home: 'no', 
+          shell: '/bin/false'}
+      - { name: 'mysql', 
+          system: 'yes',
+          home: '/nonexistent', 
+          create_home: 'no', 
+          shell: '/bin/false'}
+  tags: 
+    - amcont-users
 
-- name: "Create required  users in host"
+
+- name: "Create required users in host"
   user:
     name: "{{ item.name }}"
     uid: "{{ item.uid | default(omit) }}"
@@ -17,19 +31,28 @@
     home: "{{ item.home | default(omit) }}"
     create_home: "{{ item.create_home | default(omit) }}"
     shell: "{{ item.shell | default(omit) }}"
-  tags: am-cont-users
-  loop:
-    - { name: 'archivematica', 
-        system: 'yes', 
-        uid: '333', 
-        home: '/nonexistent', 
-        create_home: 'no', 
-        shell: '/bin/false'}
-    - { name: 'mysql', 
-        system: 'yes',
-        home: '/nonexistent', 
-        create_home: 'no', 
-        shell: '/bin/false'}
+  loop: "{{ amcont_fact_users }}"
+  tags: 
+    - amcont-users
+
+
+- name: "Get uid from required users"
+  command: id -u {{ item.name }}
+  loop: "{{ amcont_fact_users }}"
+  register: amcont_fact_uids
+  tags: 
+    - amcont-users
+
+# the following will create a dictionary with uid information
+# so for example to get the uid of the mysql user we can do:
+# {{ amcont_fact_uids_dict['mysql'] }}
+- name: "Create dictionary with uid information"
+  set_fact:
+    amcont_fact_uids_dict: "{{ amcont_fact_uids_dict|default({}) | combine( {item.item.name: item.stdout} ) }}"
+  loop: "{{ amcont_fact_uids.results }}"
+  tags: 
+    - amcont-users
+
 
 - name: "Install dependencies required by this role"
   package:
@@ -37,6 +60,14 @@
   loop:
     - docker
     - docker-compose
+
+- name: "Increase vm.max_map_count (ES req.)"
+  sysctl:
+    name: vm.max_map_count
+    value: '262144'
+    sysctl_set: yes
+  tags: amcont-es-vm-max-map-count
+
 
 - name: "Checkout archivematica-storage-service code"
   git:
@@ -74,6 +105,7 @@
   template:
     src: "docker-compose-am-src.yml.j2"
     dest: "{{ amcont_compose_cfg_dir }}/docker-compose.yml"
+  tags: amcont-compose-template
 
 # Create docker volumes
 # For simplicity, all created volumes are bind mounts os existing mount points
@@ -103,7 +135,7 @@
     build: yes
 
 # https://stackoverflow.com/questions/40230184/how-to-do-multiline-shell-script-in-ansible
-- name: "Block to bootstrap Storage Service"
+- name: "Block to bootstrap Storage Service database"
   block:
     - name: "Recreate SS database"
       shell:
@@ -141,3 +173,56 @@
         cmd: docker-compose restart archivematica-storage-service
         chdir: "{{ amcont_compose_cfg_dir }}"
   tags: amcont-ss-db-bootstrap
+
+- name: "Block to bootstrap MCP database"
+  block:
+    - name: "Recreate MCP database"
+      shell:
+        cmd: |
+          docker-compose exec mysql mysql -hlocalhost -uroot -p12345 -e "\
+            DROP DATABASE IF EXISTS MCP; \
+            CREATE DATABASE MCP; \
+            GRANT ALL ON MCP.* TO 'archivematica'@'%' IDENTIFIED BY 'demo';"
+        chdir: "{{ amcont_compose_cfg_dir }}"
+    - name: "Migrate MCP database"
+      shell:
+        cmd: |
+          docker-compose run \
+            --rm \
+            --entrypoint /src/dashboard/src/manage.py \
+            archivematica-dashboard \
+            migrate --noinput
+        chdir: "{{ amcont_compose_cfg_dir }}"
+
+    - name: "Create dashboard user"
+      shell:
+        cmd: |
+          docker-compose run \
+            --rm \
+            --entrypoint /src/dashboard/src/manage.py \
+            archivematica-dashboard \
+            install \
+            --username="test" \
+            --password="test" \
+            --email="test@test.com" \
+            --org-name="test" \
+            --org-id="test" \
+            --api-key="test" \
+            --ss-url="http://archivematica-storage-service:8000" \
+            --ss-user="test" \
+            --ss-api-key="test" \
+            --site-url="http://archivematica-dashboard:8000"
+        chdir: "{{ amcont_compose_cfg_dir }}"
+  tags: amcont-am-db-bootstrap
+
+- name: "Build front-end assets"
+  shell:
+    cmd: |
+      	docker-compose run --rm --no-deps \
+          --user root \
+          --entrypoint npm \
+          --workdir /src/dashboard/frontend \
+          archivematica-dashboard \
+          install --unsafe-perm
+    chdir: "{{ amcont_compose_cfg_dir }}"
+  tags: amcont-am-frontend-bootstrap
